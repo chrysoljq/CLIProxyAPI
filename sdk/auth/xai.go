@@ -280,3 +280,51 @@ func startXAICallbackServer(port int) (*http.Server, int, <-chan callbackResult,
 
 	return srv, port, resultCh, nil
 }
+
+type GrokCLIAuthenticator struct {
+	XAIAuthenticator
+}
+
+func NewGrokCLIAuthenticator() Authenticator {
+	return &GrokCLIAuthenticator{}
+}
+
+func (GrokCLIAuthenticator) Provider() string {
+	return "grok-cli"
+}
+
+func (g GrokCLIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	auth, err := g.XAIAuthenticator.Login(ctx, cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	if auth != nil {
+		auth.Provider = "grok-cli"
+		auth.FileName = strings.Replace(auth.FileName, "xai-", "grok-cli-", 1)
+		auth.ID = auth.FileName
+		auth.Label = strings.Replace(auth.Label, " (xAI)", "", 1) + " (Grok CLI)"
+		var accessToken string
+		if tokenStorage, ok := auth.Storage.(*xaiauth.TokenStorage); ok && tokenStorage != nil {
+			tokenStorage.Type = "grok-cli"
+			accessToken = tokenStorage.AccessToken
+		} else if token, ok := auth.Metadata["access_token"].(string); ok {
+			accessToken = token
+		}
+
+		tier := util.ProbeSubscriptionTier(ctx, accessToken)
+
+		if auth.Metadata != nil {
+			auth.Metadata["type"] = "grok-cli"
+			auth.Metadata["base_url"] = "https://cli-chat-proxy.grok.com/v1"
+			auth.Metadata["subscription_tier"] = tier
+		}
+		if auth.Attributes != nil {
+			auth.Attributes["base_url"] = "https://cli-chat-proxy.grok.com/v1"
+			auth.Attributes["subscription_tier"] = tier
+			if accessToken != "" {
+				auth.Attributes["api_key"] = accessToken
+			}
+		}
+	}
+	return auth, nil
+}

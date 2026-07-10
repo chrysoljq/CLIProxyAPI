@@ -28,6 +28,7 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	GrokCLI     []*ModelInfo `json:"grok-cli"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -108,6 +109,11 @@ func AntigravityWebSearchModelFor(modelID string) string {
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
+}
+
+// GetGrokCLIModels returns model definitions for Grok CLI.
+func GetGrokCLIModels() []*ModelInfo {
+	return cloneModelInfos(getModels().GrokCLI)
 }
 
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
@@ -296,6 +302,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "grok-cli":
+		return GetGrokCLIModels()
 	default:
 		return nil
 	}
@@ -303,6 +311,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
+// Evaluated in Story 11.8: Keep data.GrokCLI in static model lookup to support the grok-cli channel.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
 	if modelID == "" {
 		return nil
@@ -318,6 +327,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		data.GrokCLI,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

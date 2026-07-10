@@ -2655,3 +2655,188 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 	}
 	return coreauth.WithRequestInfo(ctx, info)
 }
+
+func (h *Handler) RequestGrokCLIToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Grok CLI authentication...")
+
+	pkceCodes, errPKCE := xaiauth.GeneratePKCECodes()
+	if errPKCE != nil {
+		log.Errorf("Failed to generate Grok CLI PKCE codes: %v", errPKCE)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	nonce, errNonce := misc.GenerateRandomState()
+	if errNonce != nil {
+		log.Errorf("Failed to generate nonce parameter: %v", errNonce)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate nonce parameter"})
+		return
+	}
+
+	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	discovery, errDiscover := authSvc.Discover(ctx)
+	if errDiscover != nil {
+		log.Errorf("Failed to discover Grok CLI OAuth endpoints: %v", errDiscover)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to discover oauth endpoints"})
+		return
+	}
+
+	redirectURI := fmt.Sprintf("http://%s:%d%s", xaiauth.RedirectHost, xaiauth.CallbackPort, xaiauth.RedirectPath)
+	authURL, errAuthURL := xaiauth.BuildAuthorizeURL(xaiauth.AuthorizeURLParams{
+		AuthorizationEndpoint: discovery.AuthorizationEndpoint,
+		RedirectURI:           redirectURI,
+		CodeChallenge:         pkceCodes.CodeChallenge,
+		State:                 state,
+		Nonce:                 nonce,
+	})
+	if errAuthURL != nil {
+		log.Errorf("Failed to generate Grok CLI authorization URL: %v", errAuthURL)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	RegisterOAuthSession(state, "grok-cli")
+
+	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
+	if isWebUI {
+		targetURL, errTarget := h.managementCallbackURL("/grok-cli/callback")
+		if errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute grok-cli callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(xaiauth.CallbackPort, "grok-cli", targetURL); errStart != nil {
+			log.WithError(errStart).Error("failed to start grok-cli callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+			return
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarderInstance(xaiauth.CallbackPort, forwarder)
+		}
+
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-grok-cli-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var authCode string
+		for {
+			if !IsOAuthSessionPending(state, "grok-cli") {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Error("grok-cli oauth flow timed out")
+				SetOAuthSessionError(state, "OAuth flow timed out")
+				return
+			}
+			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+				var payload map[string]string
+				_ = json.Unmarshal(data, &payload)
+				_ = os.Remove(waitFile)
+				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
+					log.Errorf("Grok CLI authentication failed: %s", errStr)
+					SetOAuthSessionError(state, "Authentication failed: "+errStr)
+					return
+				}
+				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
+					log.Errorf("Grok CLI authentication failed: state mismatch")
+					SetOAuthSessionError(state, "Authentication failed: state mismatch")
+					return
+				}
+				authCode = strings.TrimSpace(payload["code"])
+				if authCode == "" {
+					log.Error("Grok CLI authentication failed: code not found")
+					SetOAuthSessionError(state, "Authentication failed: code not found")
+					return
+				}
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		bundle, errExchange := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI, pkceCodes, discovery.TokenEndpoint)
+		if errExchange != nil {
+			log.Errorf("Failed to exchange Grok CLI token: %v", errExchange)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			log.Error("Grok CLI token exchange returned empty access token")
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+		tokenStorage.Type = "grok-cli"
+
+		fileName := xaiauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
+		fileName = strings.Replace(fileName, "xai-", "grok-cli-", 1)
+		label := strings.TrimSpace(tokenStorage.Email)
+		if label == "" {
+			label = "Grok CLI"
+		}
+
+		tier := util.ProbeSubscriptionTier(ctx, tokenStorage.AccessToken)
+
+		metadata := map[string]any{
+			"type":              "grok-cli",
+			"access_token":      tokenStorage.AccessToken,
+			"refresh_token":     tokenStorage.RefreshToken,
+			"id_token":          tokenStorage.IDToken,
+			"token_type":        tokenStorage.TokenType,
+			"expires_in":        tokenStorage.ExpiresIn,
+			"expired":           tokenStorage.Expire,
+			"last_refresh":      tokenStorage.LastRefresh,
+			"base_url":          "https://cli-chat-proxy.grok.com/v1",
+			"redirect_uri":      tokenStorage.RedirectURI,
+			"token_endpoint":    tokenStorage.TokenEndpoint,
+			"auth_kind":         "oauth",
+			"subscription_tier": tier,
+		}
+		if tokenStorage.Email != "" {
+			metadata["email"] = tokenStorage.Email
+		}
+		if tokenStorage.Subject != "" {
+			metadata["sub"] = tokenStorage.Subject
+		}
+
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "grok-cli",
+			FileName: fileName,
+			Label:    label + " (Grok CLI)",
+			Storage:  tokenStorage,
+			Metadata: metadata,
+			Attributes: map[string]string{
+				"auth_kind":         "oauth",
+				"base_url":          "https://cli-chat-proxy.grok.com/v1",
+				"api_key":           tokenStorage.AccessToken,
+				"subscription_tier": tier,
+			},
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Grok CLI token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		log.Infof("Authentication successful! Token saved to %s", savedPath)
+		log.Info("You can now use Grok CLI services through this CLI")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}

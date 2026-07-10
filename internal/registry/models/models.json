@@ -2267,5 +2267,31 @@
       "context_length": 200000,
       "max_completion_tokens": 32768
     }
+  ],
+  "grok-cli": [
+    {
+      "id": "grok-4.5-cli",
+      "object": "model",
+      "created": 1783526400,
+      "owned_by": "xai",
+      "type": "grok-cli",
+      "display_name": "Grok 4.5 (CLI)",
+      "name": "grok-4.5",
+      "description": "Grok 4.5 model on Grok CLI gateway, available for free tier accounts.",
+      "context_length": 500000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-build-cli",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "grok-cli",
+      "display_name": "Grok Build (CLI)",
+      "name": "grok-build",
+      "description": "Grok Build is xAI’s fast coding model trained specifically for agentic software engineering workflows via CLI gateway.",
+      "context_length": 256000,
+      "max_completion_tokens": 256000
+    }
   ]
 }
